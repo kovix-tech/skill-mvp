@@ -9,8 +9,9 @@
   "plugins": [
     {
       "name": "create-board-task",
-      "source": "./create-board-task",
-      "description": "Crea una tarea en un tablero"
+      "source": ".",
+      "description": "Crea una tarea en un tablero",
+      "skills": ["./create-board-task"]
     }
   ]
 }
