@@ -1,0 +1,12 @@
+{
+  "name": "kovix-skills",
+  "version": "1.0.0",
+  "description": "Skills internas de Kovix para Claude Code",
+  "skills": [
+    {
+      "name": "create-board-task",
+      "source": "./skills/create-board-task",
+      "description": "Crea una tarea en un tablero"
+    }
+  ]
+}
