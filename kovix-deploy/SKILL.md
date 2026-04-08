@@ -12,8 +12,8 @@ Set up the complete deployment infrastructure for a Kovix monorepo project on Az
 
 ## Arguments
 - `$0` — project name (lowercase, used for namespaces, image names, etc. e.g. `anden`)
-- `$1` — dev domain (e.g. `dev.anden.kovix.io`)
-- `$2` — prod domain (e.g. `anden.kovix.io`)
+- `$1` — dev domain (e.g. `dev.anden.kovix.io`). If only one environment, this is the only domain.
+- `$2` — prod domain (e.g. `anden.kovix.io`). Optional if single-environment setup.
 
 ## Prerequisites
 
@@ -27,7 +27,10 @@ The following CLI tools must be authenticated before running this skill:
 
 All infrastructure credentials must be provided in a file called `deploy-credentials.json` in the project root. **This file must be gitignored.** Read it at the start and use its values throughout.
 
-Schema:
+### Schema
+
+All top-level properties are required except `storage` (optional).
+Within `clusters` and `azureCredentials`, both `dev` and `prod` are optional — include only the environments you need.
 
 ```json
 {
@@ -79,6 +82,14 @@ If the file doesn't exist, create the template and ask the user to fill it in be
 
 Ensure `deploy-credentials.json` is in `.gitignore` before doing anything else.
 
+### Adaptive behavior based on credentials
+
+**Environments:** Check which keys exist in `clusters`. If only `dev` exists, create a single-environment setup (one overlay, one branch trigger, one set of secrets). If only `prod`, same. If both, create both. The GitHub Actions workflow branches, overlays, and k8s setup must match only the environments present.
+
+**Storage:** If `storage` property is missing or null, skip Azure Storage account creation entirely. Do not create storage accounts, do not include AZURE_STORAGE_CONNECTION_STRING in k8s secrets, do not include AZURE_STORAGE_CONTAINER in configmaps.
+
+**Database names:** If only one environment exists, use `devName` for dev-only or `prodName` for prod-only. If both, use both.
+
 ## Reference project
 
 Clone or fetch the reference implementation from https://github.com/kovix-tech/sensation-du-temps to understand the exact structure for Dockerfiles, k8s manifests, and GitHub Actions. Match its patterns.
@@ -92,12 +103,14 @@ Clone or fetch the reference implementation from https://github.com/kovix-tech/s
 
 ## Steps to execute
 
-### 1. Read credentials
-Read `deploy-credentials.json` from project root. All values below reference this file.
+### 1. Read credentials and determine scope
+Read `deploy-credentials.json` from project root. Determine:
+- Which environments to set up (check keys in `clusters`: dev, prod, or both)
+- Whether to create storage accounts (check if `storage` property exists)
 
-### 2. Azure Storage
-Create two storage accounts in `{storage.resourceGroup}` (`{storage.location}`):
-- `${project}storagedev` and `${project}storageprod`
+### 2. Azure Storage (skip if `storage` is missing)
+For each environment present in `clusters`, create a storage account in `{storage.resourceGroup}` (`{storage.location}`):
+- `${project}storage{env}` (e.g. `andenstoragedev`, `andenstorageprod`)
 - Each with a container called `uploads`
 - Public blob access disabled, TLS 1.2
 - Get connection strings for each
@@ -116,6 +129,8 @@ Create two storage accounts in `{storage.resourceGroup}` (`{storage.location}`):
 - `.dockerignore` — exclude node_modules, .env, .next, .turbo, .git, k8s, .github, .claude, docs, tests
 
 ### 6. Kubernetes manifests (Kustomize)
+Create base manifests always. Create overlays only for environments present in `clusters`.
+
 ```
 k8s/
 ├── base/
@@ -126,38 +141,49 @@ k8s/
 │   ├── web-service.yaml           (ClusterIP 3000)
 │   └── ingress.yaml               (nginx, TLS placeholder)
 └── overlays/
-    ├── dev/
+    ├── dev/   (only if clusters.dev exists)
     │   ├── kustomization.yaml     (namespace: ${project}-dev, images tag: dev)
     │   ├── ingress-patch.yaml     (hosts: $1, api.$1, cert-issuer: kovix-cert-issuer)
     │   ├── configmap.yaml.template
     │   └── secrets.yaml.template
-    └── prod/
+    └── prod/  (only if clusters.prod exists)
         ├── kustomization.yaml     (namespace: ${project}-prod, images tag: prod)
-        ├── ingress-patch.yaml     (hosts: $2, api.$2, cert-issuer: kovix-cert-issuer)
+        ├── ingress-patch.yaml     (hosts: $2 or $1 if single env, api.{domain})
         ├── configmap.yaml.template
         └── secrets.yaml.template
 ```
 
+ConfigMap: only include AZURE_STORAGE_CONTAINER if `storage` exists.
+Secrets template: only include AZURE_STORAGE_CONNECTION_STRING if `storage` exists.
+
 ### 7. GitHub Actions (`.github/workflows/deploy.yml`)
-- Trigger: push to `dev` or `prod` branches + workflow_dispatch
+- Trigger: push to branches matching only the environments in `clusters` + workflow_dispatch
+  - If only dev: trigger on `dev` only
+  - If only prod: trigger on `prod` only
+  - If both: trigger on `dev` and `prod`
 - Jobs: setup → build-and-push-web + build-and-push-backend (parallel) → deploy
-- Dev branch → AZURE_CREDENTIALS + AKS_CLUSTER_DEV
-- Prod branch → AZURE_CREDENTIALS_PROD + AKS_CLUSTER_PROD
 - Deploy step with `timeout-minutes: 5`
 - Image names: `${project}-web` and `${project}-backend`
 - Use Kustomize to build manifests, azure/k8s-deploy@v5
+- If single environment, simplify the conditionals (no need for dev/prod branching logic)
 
 ### 8. GitHub Secrets (set with `gh secret set`)
-Read all values from `deploy-credentials.json` and set:
+Read values from `deploy-credentials.json` and set only what's needed:
+
+Always set:
 - `ACR_NAME` ← `acr.name`
 - `ACR_USERNAME` ← `acr.username`
 - `ACR_PASSWORD` ← `acr.password`
+
+If `clusters.dev` exists:
 - `AKS_CLUSTER_DEV` ← `clusters.dev.name`
-- `AKS_CLUSTER_PROD` ← `clusters.prod.name`
 - `AKS_RESOURCE_GROUP_DEV` ← `clusters.dev.resourceGroup`
+- `AZURE_CREDENTIALS` ← full JSON from `azureCredentials.dev` (with Azure endpoints)
+
+If `clusters.prod` exists:
+- `AKS_CLUSTER_PROD` ← `clusters.prod.name`
 - `AKS_RESOURCE_GROUP_PROD` ← `clusters.prod.resourceGroup`
-- `AZURE_CREDENTIALS` ← full JSON from `azureCredentials.dev` (with all Azure endpoints added)
-- `AZURE_CREDENTIALS_PROD` ← full JSON from `azureCredentials.prod` (with all Azure endpoints added)
+- `AZURE_CREDENTIALS_PROD` ← full JSON from `azureCredentials.prod` (with Azure endpoints)
 
 The AZURE_CREDENTIALS JSON must include these extra fields beyond the 4 core ones:
 ```json
@@ -172,19 +198,21 @@ The AZURE_CREDENTIALS JSON must include these extra fields beyond the 4 core one
 ```
 
 ### 9. Kubernetes cluster setup
-For each environment (dev, prod):
+For each environment present in `clusters`:
 1. `az aks get-credentials` using `clusters.{env}` values
 2. `kubectl create namespace ${project}-{env}`
 3. `kubectl apply -f` the configmap template
 4. `kubectl create secret generic app-secrets` with:
-   - DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME from `database.*`
+   - DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME from `database.*` (use devName or prodName accordingly)
    - TRUSTED_ORIGIN from the domain
    - BETTER_AUTH_SECRET (generate unique per environment)
-   - AZURE_STORAGE_CONNECTION_STRING (from the storage accounts created in step 2)
-   - AZURE_STORAGE_CONTAINER = "uploads"
+   - AZURE_STORAGE_CONNECTION_STRING (only if `storage` exists, from storage accounts created in step 2)
+   - AZURE_STORAGE_CONTAINER = "uploads" (only if `storage` exists)
 
 ## Important
 - Always verify `deploy-credentials.json` is in `.gitignore` first
 - Ask the user for any missing values in the credentials file
 - Generate a unique BETTER_AUTH_SECRET per environment with `crypto.randomBytes(32).toString('hex')`
-- Namespace pattern: `${project}-dev`, `${project}-prod`
+- Namespace pattern: `${project}-{env}`
+- Only create resources for environments that exist in the credentials file
+- Only create storage resources if `storage` property is present
